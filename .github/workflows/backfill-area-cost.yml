@@ -1,0 +1,211 @@
+# 특정 단지의 면적별 관리비 과거 데이터 백필
+# - workflow_dispatch로 수동 트리거
+# - 지정한 범위(기본: 사용승인월 ~ 1개월 전)의 월을 순차 수집
+# - 이미 존재하는 월은 스킵
+# - 메인 루프 이후 실패 월에 대해 2회 추가 재시도 (백오프 포함) 수행
+# - 월별 실패 시 텔레그램 스크린샷은 보내지 않음 (스팸 방지). 최종 요약만 1회 전송
+# - k-apt rate-limit 회피용 월 사이 20~40초 랜덤 대기
+# - 결과는 giftbott/wooridanji 저장소에 커밋
+#
+# 사용 예:
+#   Actions 탭 → "Backfill Area Cost (single complex)" → Run workflow
+#   kaptCode: A10027461
+#   aptName: 힐스테이트 송파위례아파트
+#   startMonth: 201607
+#   endMonth: (비워두면 전월)
+
+name: Backfill Area Cost (single complex)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kaptCode:
+        description: 'kaptCode (예: A10027461)'
+        required: true
+      aptName:
+        description: 'k-apt 등록명 (예: 힐스테이트 송파위례아파트)'
+        required: true
+      startMonth:
+        description: '시작월 YYYYMM (예: 201607)'
+        required: true
+      endMonth:
+        description: '종료월 YYYYMM (비우면 전월 = 오늘 기준 1개월 전)'
+        required: false
+
+concurrency:
+  group: data-commit
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          ref: feat/management-fee-comparison
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Generate month list
+        id: months
+        run: |
+          START="${{ inputs.startMonth }}"
+          END="${{ inputs.endMonth }}"
+          if [ -z "$END" ]; then
+            END=$(TZ=Asia/Seoul date -d '1 month ago' +'%Y%m')
+          fi
+          echo "[INFO] Range: $START ~ $END"
+          MONTHS=""
+          CUR=$START
+          while [ "$CUR" -le "$END" ]; do
+            MONTHS="$MONTHS $CUR"
+            Y=${CUR:0:4}
+            M=${CUR:4:2}
+            M=$((10#$M + 1))
+            if [ $M -gt 12 ]; then
+              M=1; Y=$((Y + 1))
+            fi
+            CUR=$(printf "%04d%02d" "$Y" "$M")
+          done
+          COUNT=$(echo $MONTHS | wc -w)
+          echo "[INFO] Total months: $COUNT"
+          echo "months=$MONTHS" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Backfill (main pass + 2x retry)
+        # TELEGRAM 토큰 미전달: fetch-area-cost.ts의 월별 실패 스크린샷 텔레그램 전송 skip
+        env:
+          KAPT: ${{ inputs.kaptCode }}
+          NAME: ${{ inputs.aptName }}
+        run: |
+          DIR="src/data/real-estate/area-cost/$KAPT"
+          mkdir -p "$DIR"
+
+          # 단일 월 시도 함수: 성공=0, 실패=1
+          try_month() {
+            local M=$1
+            local ATTEMPT=$2
+            local TARGET="$DIR/${M}.json"
+            if [ -f "$TARGET" ]; then
+              return 0
+            fi
+            echo "[FETCH attempt=${ATTEMPT}] $M"
+            if npx tsx scripts/fetch-area-cost.ts --kapt "$KAPT" --name "$NAME" "$M"; then
+              [ -f "$TARGET" ] && return 0
+            fi
+            return 1
+          }
+
+          # ── 1차 pass: 전 구간 순차 ──
+          PASS1_FAIL=""
+          SKIPPED=0
+          for M in ${{ steps.months.outputs.months }}; do
+            TARGET="$DIR/${M}.json"
+            if [ -f "$TARGET" ]; then
+              SKIPPED=$((SKIPPED+1))
+              continue
+            fi
+            if try_month "$M" 1; then
+              :
+            else
+              PASS1_FAIL="$PASS1_FAIL $M"
+            fi
+            sleep $((RANDOM % 21 + 20))
+          done
+          echo ""
+          echo "=== 1차 pass 종료 ==="
+          echo "스킵: $SKIPPED"
+          [ -n "$PASS1_FAIL" ] && echo "1차 실패:$PASS1_FAIL"
+
+          # ── 2차 pass: 1차 실패분 재시도 (60~120초 대기) ──
+          PASS2_FAIL=""
+          if [ -n "$PASS1_FAIL" ]; then
+            echo ""
+            echo "[INFO] 2차 pass 시작 (백오프 적용)"
+            sleep 180
+            for M in $PASS1_FAIL; do
+              if try_month "$M" 2; then
+                :
+              else
+                PASS2_FAIL="$PASS2_FAIL $M"
+              fi
+              sleep $((RANDOM % 61 + 60))
+            done
+            echo ""
+            echo "=== 2차 pass 종료 ==="
+            [ -n "$PASS2_FAIL" ] && echo "2차 실패:$PASS2_FAIL"
+          fi
+
+          # ── 3차 pass: 2차도 실패한 것만, 더 긴 대기 ──
+          FINAL_FAIL=""
+          if [ -n "$PASS2_FAIL" ]; then
+            echo ""
+            echo "[INFO] 3차 pass 시작 (최장 백오프)"
+            sleep 300
+            for M in $PASS2_FAIL; do
+              if try_month "$M" 3; then
+                :
+              else
+                FINAL_FAIL="$FINAL_FAIL $M"
+              fi
+              sleep $((RANDOM % 91 + 90))
+            done
+          fi
+
+          # 결과 집계 (파일 존재 기준)
+          SUCCESS=0
+          for M in ${{ steps.months.outputs.months }}; do
+            [ -f "$DIR/${M}.json" ] && SUCCESS=$((SUCCESS+1))
+          done
+          TOTAL=$(echo ${{ steps.months.outputs.months }} | wc -w)
+          FAILED=$((TOTAL - SUCCESS))
+
+          echo ""
+          echo "=== 최종 결과 ==="
+          echo "전체: $TOTAL / 성공: $SUCCESS / 실패: $FAILED"
+          [ -n "$FINAL_FAIL" ] && echo "최종 실패:$FINAL_FAIL"
+
+          # 실패 기록 (재시도용)
+          mkdir -p failures
+          [ -n "$FINAL_FAIL" ] && echo "$FINAL_FAIL" > "failures/${KAPT}.txt"
+
+          # 이후 단계에서 쓰도록 env export
+          echo "FINAL_SUCCESS=$SUCCESS" >> $GITHUB_ENV
+          echo "FINAL_FAILED=$FAILED" >> $GITHUB_ENV
+          echo "FINAL_FAIL_LIST=$FINAL_FAIL" >> $GITHUB_ENV
+
+      - name: Telegram summary (1회만)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "[INFO] Telegram token 미설정, 요약 전송 skip"
+            exit 0
+          fi
+          MSG="🗂 면적별 관리비 백필 완료: ${{ inputs.aptName }} (${{ inputs.kaptCode }})%0A성공: ${FINAL_SUCCESS}, 실패: ${FINAL_FAILED}"
+          [ -n "$FINAL_FAIL_LIST" ] && MSG="${MSG}%0A최종 실패월:${FINAL_FAIL_LIST}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$MSG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backfill-${{ inputs.kaptCode }}
+          path: |
+            src/data/real-estate/area-cost/${{ inputs.kaptCode }}/
+            failures/${{ inputs.kaptCode }}.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: 'chore: backfill area-cost ${{ inputs.kaptCode }} (${{ inputs.startMonth }}~)'
+          file_pattern: 'src/data/real-estate/area-cost/${{ inputs.kaptCode }}/*.json'
