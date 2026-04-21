@@ -1,0 +1,83 @@
+# 실거래가 데이터 수집
+# - 소스: 국토교통부 실거래가 공공 API (매매 + 전월세)
+# - 주기: 매일 07:00 KST
+# - 저장: public/data/real-estate/{아파트}.json (giftbott/wooridanji, 아파트별)
+# - 용도: 실거래가 페이지 및 홈 위젯
+# - 알림: 신규 거래 감지 시 Telegram 알림 발송
+
+name: Fetch Real Estate Data
+on:
+  schedule:
+    - cron: '0 22 * * *' # 매일 07:00 KST (UTC 22:00)
+  workflow_dispatch:
+
+concurrency:
+  group: data-commit
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      complexes: ${{ steps.load.outputs.complexes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+          sparse-checkout: complexes.json
+          sparse-checkout-cone-mode: false
+      - id: load
+        run: echo "complexes=$(jq -c '.' complexes.json)" >> $GITHUB_OUTPUT
+
+  fetch:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        complex: ${{ fromJson(needs.setup.outputs.complexes) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Fetch real estate data
+        run: |
+          COMPLEX_SLUG=${{ matrix.complex.slug }} \
+          APT_NAME=${{ matrix.complex.name }} \
+          APT_REGION_CODE=${{ matrix.complex.regionCode }} \
+          npx tsx scripts/fetch-real-estate.ts
+        env:
+          OPEN_DATA_API_KEY: ${{ secrets.OPEN_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-estate-${{ matrix.complex.slug }}
+          path: |
+            src/data/real-estate/raw/
+            public/data/real-estate/
+          retention-days: 1
+          if-no-files-found: ignore
+
+  commit:
+    needs: fetch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: real-estate-*
+          merge-multiple: true
+      - uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: 'chore: update real estate data'
+          file_pattern: 'src/data/real-estate/raw/* public/data/real-estate/*'

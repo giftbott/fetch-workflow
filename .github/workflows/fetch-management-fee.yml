@@ -1,0 +1,83 @@
+# 관리비 상세 스냅샷 수집
+# - 소스: 공공데이터포털 REST API (에너지, 장충금, 개별사용료, 공용관리비 등 26개 엔드포인트)
+# - 대상: 1개월 전 데이터
+# - 저장: src/data/complexes/{slug}/management-fee/YYYYMM.json (giftbott/wooridanji)
+# - 용도: 단지 공통 탭 (장충금, 에너지 비용, 공용관리비 상세)
+
+name: Fetch Management Fee Snapshot
+
+on:
+  schedule:
+    - cron: '0 0 23-30 * *' # KST 09:00, 매달 23~30일
+  workflow_dispatch:
+
+concurrency:
+  group: data-commit
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      complexes: ${{ steps.load.outputs.complexes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+          sparse-checkout: complexes.json
+          sparse-checkout-cone-mode: false
+      - id: load
+        run: echo "complexes=$(jq -c '.' complexes.json)" >> $GITHUB_OUTPUT
+
+  fetch:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        complex: ${{ fromJson(needs.setup.outputs.complexes) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Fetch management fee
+        run: |
+          MONTH=$(date -d '1 month ago' +'%Y%m')
+          TARGET="src/data/complexes/${{ matrix.complex.slug }}/management-fee/${MONTH}.json"
+          if [ -f "$TARGET" ]; then
+            echo "[INFO] 이미 스냅샷 존재: ${TARGET} (스킵)"
+            exit 0
+          fi
+          COMPLEX_SLUG=${{ matrix.complex.slug }} \
+          npm run fetch:management-fee -- "$MONTH" "${{ matrix.complex.kaptCode }}"
+        env:
+          OPEN_DATA_API_KEY: ${{ secrets.OPEN_DATA_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fee-${{ matrix.complex.slug }}
+          path: src/data/complexes/${{ matrix.complex.slug }}/management-fee/
+          retention-days: 1
+          if-no-files-found: ignore
+
+  commit:
+    needs: fetch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fee-*
+          merge-multiple: true
+      - uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: 'chore: update management fee snapshot'
+          file_pattern: 'src/data/complexes/*/management-fee/*.json'

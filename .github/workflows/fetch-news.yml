@@ -1,0 +1,36 @@
+# 뉴스 기사 수집
+# - 소스: Google News RSS (키워드별 검색)
+# - 주기: 하루 2회 (09:00, 17:00 KST)
+# - 저장: src/data/shared/news/{키워드}.json (giftbott/wooridanji)
+# - 용도: 뉴스 페이지 및 홈 위젯
+# - 모든 단지의 키워드를 중복 제거 후 한 번에 수집
+
+name: Fetch News
+on:
+  schedule:
+    - cron: '0 0,8 * * *' # 09:00, 17:00 KST
+  workflow_dispatch:
+
+concurrency:
+  group: data-commit
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Fetch news
+        run: npx tsx scripts/fetch-news.ts
+      - uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: 'chore: update news data'
+          file_pattern: 'src/data/shared/news/*.json'

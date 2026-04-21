@@ -1,0 +1,102 @@
+# 면적별 관리비 데이터 수집
+# - 소스: k-apt.go.kr (Playwright 크롤링 → Excel 다운로드 → JSON 변환)
+# - 대상: 1개월 전 데이터 (관리비는 약 2개월 후 공개)
+# - 저장: src/data/complexes/{slug}/area-cost/YYYYMM.json (giftbott/wooridanji)
+# - 용도: 관리비 요약 (합계, 구성비, 추이, 면적별 비교)
+
+name: Fetch Area Cost Data
+
+on:
+  schedule:
+    - cron: '0 0 23-28 * *' # KST 09:00, 매달 23~28일
+  workflow_dispatch:
+
+concurrency:
+  group: data-commit
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      complexes: ${{ steps.load.outputs.complexes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+          sparse-checkout: complexes.json
+          sparse-checkout-cone-mode: false
+      - id: load
+        run: echo "complexes=$(jq -c '.' complexes.json)" >> $GITHUB_OUTPUT
+
+  fetch:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        complex: ${{ fromJson(needs.setup.outputs.complexes) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+      - name: Fetch area cost
+        run: |
+          MONTH=$(date -d '1 month ago' +'%Y%m')
+          TARGET="src/data/complexes/${{ matrix.complex.slug }}/area-cost/${MONTH}.json"
+          if [ -f "$TARGET" ]; then
+            echo "[INFO] 이미 존재: ${TARGET} (스킵)"
+            exit 0
+          fi
+          if COMPLEX_SLUG=${{ matrix.complex.slug }} \
+             KAPTCODE=${{ matrix.complex.kaptCode }} \
+             APT_NAME=${{ matrix.complex.name }} \
+             npx tsx scripts/fetch-area-cost.ts "$MONTH"; then
+            if [ -f "$TARGET" ]; then
+              MSG="✅ 면적별 관리비 수집 완료: ${{ matrix.complex.name }} ${MONTH:0:4}년 ${MONTH:4:2}월"
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$MSG"
+            fi
+          else
+            DAY=$(TZ=Asia/Seoul date +'%d')
+            if [ "$DAY" -ge 25 ]; then
+              MSG="⚠️ 면적별 관리비 미수집: ${{ matrix.complex.name }} ${MONTH:0:4}년 ${MONTH:4:2}월 — ${DAY}일 기준 아직 데이터 없음"
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$MSG"
+            fi
+          fi
+        env:
+          OPEN_DATA_API_KEY: ${{ secrets.OPEN_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: area-cost-${{ matrix.complex.slug }}
+          path: src/data/complexes/${{ matrix.complex.slug }}/area-cost/
+          retention-days: 1
+          if-no-files-found: ignore
+
+  commit:
+    needs: fetch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: giftbott/wooridanji
+          token: ${{ secrets.GH_PAT }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: area-cost-*
+          merge-multiple: true
+      - uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: 'chore: update area cost data'
+          file_pattern: 'src/data/complexes/*/area-cost/*.json'
