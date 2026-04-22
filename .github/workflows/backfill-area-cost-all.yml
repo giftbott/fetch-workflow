@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       exclude:
-        description: '제외할 kaptCode (쉼표로 구분). 기본: 힐스테이트송파위례 (별도 실행 중)'
+        description: '제외할 kaptCode (쉼표로 구분). 비우면 전 단지 대상.'
         required: false
-        default: 'A10027461'
+        default: ''
 
 concurrency:
   group: backfill-all
