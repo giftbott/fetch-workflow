@@ -109,6 +109,7 @@ jobs:
           SUCCESS=0
           FAILED=0
           SKIPPED=0
+          RATE_LIMITED=0
           FAIL_LIST=""
 
           for M in ${{ steps.months.outputs.months }}; do
@@ -119,24 +120,31 @@ jobs:
             fi
             echo ""
             echo "[FETCH] $KAPT $M"
-            if npx tsx scripts/fetch-area-cost.ts --kapt "$KAPT" --name "$NAME" "$M"; then
-              if [ -f "$TARGET" ]; then
-                SUCCESS=$((SUCCESS+1))
-              else
-                FAILED=$((FAILED+1))
-                FAIL_LIST="$FAIL_LIST $M"
-              fi
+            set +e
+            npx tsx scripts/fetch-area-cost.ts --kapt "$KAPT" --name "$NAME" "$M"
+            RC=$?
+            set -e
+
+            if [ "$RC" -eq 0 ] && [ -f "$TARGET" ]; then
+              SUCCESS=$((SUCCESS+1))
+              sleep $((RANDOM % 21 + 20))
+            elif [ "$RC" -eq 2 ]; then
+              # rate-limit: 단지 선택 직후 메인으로 튕김 → 세션 쿨다운 필요
+              RATE_LIMITED=$((RATE_LIMITED+1))
+              FAILED=$((FAILED+1))
+              FAIL_LIST="$FAIL_LIST $M"
+              echo "[WARN] rate-limit 감지 (누적 ${RATE_LIMITED}회), 180초 휴식..."
+              sleep 180
             else
               FAILED=$((FAILED+1))
               FAIL_LIST="$FAIL_LIST $M"
+              sleep $((RANDOM % 21 + 20))
             fi
-            # rate-limit 회피: 20~40초 랜덤 대기
-            sleep $((RANDOM % 21 + 20))
           done
 
           echo ""
           echo "=== $NAME ($KAPT) ==="
-          echo "성공: $SUCCESS / 스킵: $SKIPPED / 실패: $FAILED"
+          echo "성공: $SUCCESS / 스킵: $SKIPPED / 실패: $FAILED (rate-limit: $RATE_LIMITED)"
           [ -n "$FAIL_LIST" ] && echo "실패월:$FAIL_LIST"
 
           # 실패 기록 (재시도용)
