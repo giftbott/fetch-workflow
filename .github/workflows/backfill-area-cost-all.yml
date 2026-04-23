@@ -129,12 +129,14 @@ jobs:
               SUCCESS=$((SUCCESS+1))
               sleep $((RANDOM % 21 + 20))
             elif [ "$RC" -eq 2 ]; then
-              # rate-limit: 단지 선택 직후 메인으로 튕김 → 세션 쿨다운 필요
+              # rate-limit: step 4 후 관리비 페이지로 진입 실패 → 세션 쿨다운
+              # 각 단계 대기시간을 늘려 애초에 rate-limit을 덜 타도록 했으므로
+              # 쿨다운은 60초로 단축. 여전히 막히면 자연스럽게 반복됨.
               RATE_LIMITED=$((RATE_LIMITED+1))
               FAILED=$((FAILED+1))
               FAIL_LIST="$FAIL_LIST $M"
-              echo "[WARN] rate-limit 감지 (누적 ${RATE_LIMITED}회), 180초 휴식..."
-              sleep 180
+              echo "[WARN] rate-limit 감지 (누적 ${RATE_LIMITED}회), 60초 휴식..."
+              sleep 60
             else
               FAILED=$((FAILED+1))
               FAIL_LIST="$FAIL_LIST $M"
