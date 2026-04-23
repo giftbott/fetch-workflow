@@ -52,30 +52,39 @@ jobs:
           with open('src/data/real-estate/comparison-targets.json') as f:
               all_targets = json.load(f)
           today = date.today()
-          # k-apt 공개 지연을 고려해 2개월 전까지를 대상으로 (예: 4월이면 202602).
-          # 전월은 아직 미공개인 경우가 많아 alert-nodata로 돌아오므로 시도 자체 안 함.
-          m = today.month - 2
+          # k-apt 공개 스케줄 기반:
+          # - 이달 25일 이전(1~24일): 전전월이 최신 (예: 4/23 → 202602)
+          # - 25일 이후(25~말일): 전월이 공개됨 (예: 4/25 → 202603)
+          offset = 2 if today.day < 25 else 1
+          m = today.month - offset
           y = today.year
-          if m <= 0:
+          while m <= 0:
               m += 12
               y -= 1
           end_y, end_m = y, m
+          # 2년 단위 chunk (runner IP 분산 + matrix 256 한도 준수).
+          # 1년 단위면 전체 ~336개로 한도 초과. 2년이면 ~180개 선.
           chunks = []
+          YEAR_STEP = 2
           for t in all_targets:
               if t['kaptCode'] in exclude:
                   continue
               sy, sm = int(t['startMonth'][:4]), int(t['startMonth'][4:])
-              for y in range(sy, end_y + 1):
+              y = sy
+              while y <= end_y:
+                  chunk_end_y = min(y + YEAR_STEP - 1, end_y)
                   start_mm = sm if y == sy else 1
-                  end_mm = end_m if y == end_y else 12
+                  end_mm = end_m if chunk_end_y == end_y else 12
+                  label = f'{y}' if y == chunk_end_y else f'{y}-{chunk_end_y}'
                   chunks.append({
                       'region': t['region'],
                       'kaptCode': t['kaptCode'],
                       'kaptName': t['kaptName'],
-                      'year': y,
+                      'yearLabel': label,
                       'startMonth': f'{y}{start_mm:02d}',
-                      'endMonth': f'{y}{end_mm:02d}',
+                      'endMonth': f'{chunk_end_y}{end_mm:02d}',
                   })
+                  y += YEAR_STEP
           print(json.dumps(chunks, ensure_ascii=False))
           ")
           COUNT=$(echo "$CHUNKS" | python3 -c "import json, sys; print(len(json.load(sys.stdin)))")
@@ -124,7 +133,7 @@ jobs:
             CUR=$(printf "%04d%02d" "$Y" "$M")
           done
           COUNT=$(echo $MONTHS | wc -w)
-          echo "[INFO] ${{ matrix.chunk.kaptName }} (${{ matrix.chunk.kaptCode }}) ${{ matrix.chunk.year }}년: ${START}~${END} (${COUNT}개월)"
+          echo "[INFO] ${{ matrix.chunk.kaptName }} (${{ matrix.chunk.kaptCode }}) ${{ matrix.chunk.yearLabel }}년: ${START}~${END} (${COUNT}개월)"
           echo "months=$MONTHS" >> $GITHUB_OUTPUT
 
       - name: Backfill
@@ -133,7 +142,7 @@ jobs:
         env:
           KAPT: ${{ matrix.chunk.kaptCode }}
           NAME: ${{ matrix.chunk.kaptName }}
-          YEAR_LABEL: ${{ matrix.chunk.year }}
+          YEAR_LABEL: ${{ matrix.chunk.yearLabel }}
         run: |
           DIR="src/data/real-estate/area-cost/$KAPT"
           mkdir -p "$DIR" failures
@@ -189,10 +198,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           # 단지×연도 chunk 단위 고유 이름 (동일 단지 여러 잡이 충돌하지 않도록)
-          name: backfill-${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.year }}
+          name: backfill-${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}
           path: |
             src/data/real-estate/area-cost/${{ matrix.chunk.kaptCode }}/
-            failures/${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.year }}.txt
+            failures/${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}.txt
           retention-days: 14
           if-no-files-found: ignore
 
