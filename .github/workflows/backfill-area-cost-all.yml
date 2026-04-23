@@ -52,11 +52,14 @@ jobs:
           with open('src/data/real-estate/comparison-targets.json') as f:
               all_targets = json.load(f)
           today = date.today()
-          # 전월 계산 (서울 시간 기준, runner UTC지만 하루 차이는 무시)
-          if today.month == 1:
-              end_y, end_m = today.year - 1, 12
-          else:
-              end_y, end_m = today.year, today.month - 1
+          # k-apt 공개 지연을 고려해 2개월 전까지를 대상으로 (예: 4월이면 202602).
+          # 전월은 아직 미공개인 경우가 많아 alert-nodata로 돌아오므로 시도 자체 안 함.
+          m = today.month - 2
+          y = today.year
+          if m <= 0:
+              m += 12
+              y -= 1
+          end_y, end_m = y, m
           chunks = []
           for t in all_targets:
               if t['kaptCode'] in exclude:
