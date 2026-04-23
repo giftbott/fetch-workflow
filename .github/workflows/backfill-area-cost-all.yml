@@ -29,7 +29,7 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.gen.outputs.targets }}
+      chunks: ${{ steps.gen.outputs.chunks }}
       count: ${{ steps.gen.outputs.count }}
     steps:
       - uses: actions/checkout@v5
@@ -42,28 +42,53 @@ jobs:
       - id: gen
         env:
           EXCLUDE_INPUT: ${{ inputs.exclude }}
+        # 단지 × 연도 조합(chunk)으로 매트릭스 생성.
+        # 각 chunk = 서로 다른 runner = 서로 다른 IP → k-apt 누적 rate-limit 효과 분산.
         run: |
-          TARGETS=$(python3 -c "
+          CHUNKS=$(python3 -c "
           import json, os
+          from datetime import date
           exclude = set(s.strip() for s in os.environ['EXCLUDE_INPUT'].split(',') if s.strip())
           with open('src/data/real-estate/comparison-targets.json') as f:
               all_targets = json.load(f)
-          filtered = [t for t in all_targets if t['kaptCode'] not in exclude]
-          print(json.dumps(filtered))")
-          COUNT=$(echo "$TARGETS" | python3 -c "import json, sys; print(len(json.load(sys.stdin)))")
-          echo "targets=$TARGETS" >> $GITHUB_OUTPUT
+          today = date.today()
+          # 전월 계산 (서울 시간 기준, runner UTC지만 하루 차이는 무시)
+          if today.month == 1:
+              end_y, end_m = today.year - 1, 12
+          else:
+              end_y, end_m = today.year, today.month - 1
+          chunks = []
+          for t in all_targets:
+              if t['kaptCode'] in exclude:
+                  continue
+              sy, sm = int(t['startMonth'][:4]), int(t['startMonth'][4:])
+              for y in range(sy, end_y + 1):
+                  start_mm = sm if y == sy else 1
+                  end_mm = end_m if y == end_y else 12
+                  chunks.append({
+                      'region': t['region'],
+                      'kaptCode': t['kaptCode'],
+                      'kaptName': t['kaptName'],
+                      'year': y,
+                      'startMonth': f'{y}{start_mm:02d}',
+                      'endMonth': f'{y}{end_mm:02d}',
+                  })
+          print(json.dumps(chunks, ensure_ascii=False))
+          ")
+          COUNT=$(echo "$CHUNKS" | python3 -c "import json, sys; print(len(json.load(sys.stdin)))")
+          echo "chunks=$CHUNKS" >> $GITHUB_OUTPUT
           echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "[INFO] 대상 단지: $COUNT개"
+          echo "[INFO] 대상 chunk: $COUNT개 (단지 × 연도)"
 
   fetch:
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 10
       matrix:
-        target: ${{ fromJson(needs.setup.outputs.targets) }}
+        chunk: ${{ fromJson(needs.setup.outputs.chunks) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -81,8 +106,8 @@ jobs:
       - name: Generate month list
         id: months
         run: |
-          START="${{ matrix.target.startMonth }}"
-          END=$(TZ=Asia/Seoul date -d '1 month ago' +'%Y%m')
+          START="${{ matrix.chunk.startMonth }}"
+          END="${{ matrix.chunk.endMonth }}"
           MONTHS=""
           CUR=$START
           while [ "$CUR" -le "$END" ]; do
@@ -96,15 +121,16 @@ jobs:
             CUR=$(printf "%04d%02d" "$Y" "$M")
           done
           COUNT=$(echo $MONTHS | wc -w)
-          echo "[INFO] ${{ matrix.target.kaptName }} (${{ matrix.target.kaptCode }}): ${START}~${END} (${COUNT}개월)"
+          echo "[INFO] ${{ matrix.chunk.kaptName }} (${{ matrix.chunk.kaptCode }}) ${{ matrix.chunk.year }}년: ${START}~${END} (${COUNT}개월)"
           echo "months=$MONTHS" >> $GITHUB_OUTPUT
 
       - name: Backfill
         # TELEGRAM 토큰을 일부러 전달하지 않음 → 월별 실패 시 스크린샷 텔레그램 전송 skip
         # (수백 건의 알림 스팸 방지. 실패 월 요약은 commit job에서 한 번만 전송)
         env:
-          KAPT: ${{ matrix.target.kaptCode }}
-          NAME: ${{ matrix.target.kaptName }}
+          KAPT: ${{ matrix.chunk.kaptCode }}
+          NAME: ${{ matrix.chunk.kaptName }}
+          YEAR_LABEL: ${{ matrix.chunk.year }}
         run: |
           DIR="src/data/real-estate/area-cost/$KAPT"
           mkdir -p "$DIR" failures
@@ -148,21 +174,22 @@ jobs:
           done
 
           echo ""
-          echo "=== $NAME ($KAPT) ==="
+          echo "=== $NAME ($KAPT) ${YEAR_LABEL}년 ==="
           echo "성공: $SUCCESS / 스킵: $SKIPPED / 실패: $FAILED (rate-limit: $RATE_LIMITED)"
           [ -n "$FAIL_LIST" ] && echo "실패월:$FAIL_LIST"
 
-          # 실패 기록 (재시도용)
+          # 실패 기록 (재시도용) - 같은 단지의 다른 연도 chunk와 충돌 안 나도록 연도 포함
           if [ -n "$FAIL_LIST" ]; then
-            echo "$FAIL_LIST" > "failures/${KAPT}.txt"
+            echo "$FAIL_LIST" > "failures/${KAPT}-${YEAR_LABEL}.txt"
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: backfill-${{ matrix.target.kaptCode }}
+          # 단지×연도 chunk 단위 고유 이름 (동일 단지 여러 잡이 충돌하지 않도록)
+          name: backfill-${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.year }}
           path: |
-            src/data/real-estate/area-cost/${{ matrix.target.kaptCode }}/
-            failures/${{ matrix.target.kaptCode }}.txt
+            src/data/real-estate/area-cost/${{ matrix.chunk.kaptCode }}/
+            failures/${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.year }}.txt
           retention-days: 14
           if-no-files-found: ignore
 
@@ -183,6 +210,7 @@ jobs:
 
       - name: Summarize
         id: summary
+        # 파일명 형식: failures/KAPTCODE-YEAR.txt (예: A10023583-2024.txt)
         run: |
           TOTAL_FILES=$(find src/data/real-estate/area-cost -name '*.json' -newer .git/HEAD 2>/dev/null | wc -l)
           FAILURE_COUNT=0
@@ -190,11 +218,11 @@ jobs:
           if [ -d failures ]; then
             for f in failures/*.txt; do
               [ -f "$f" ] || continue
-              KAPT=$(basename "$f" .txt)
+              STEM=$(basename "$f" .txt)          # KAPT-YEAR
               MONTHS=$(cat "$f")
               COUNT=$(echo "$MONTHS" | wc -w)
               FAILURE_COUNT=$((FAILURE_COUNT + COUNT))
-              FAILURE_SUMMARY="${FAILURE_SUMMARY}\n${KAPT}:${MONTHS}"
+              FAILURE_SUMMARY="${FAILURE_SUMMARY}\n${STEM}:${MONTHS}"
             done
           fi
           echo "[요약] 실패 월 총: $FAILURE_COUNT"
