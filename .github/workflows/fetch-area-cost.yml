@@ -11,7 +11,9 @@ name: Fetch Management Fee by Area
 
 on:
   schedule:
-    - cron: '0 23 24-28 * *' # KST 08:00, 매달 24~28일 (k-apt 공개 대략 24일)
+    # UTC 23:00 on days 23-27 → KST 08:00 on days 24-28 (KST = UTC+9, 하루 넘어감).
+    # k-apt 공개 관찰상 24일부터 전월 데이터 조회 가능.
+    - cron: '0 23 23-27 * *'
   workflow_dispatch:
     inputs:
       exclude:
@@ -48,6 +50,9 @@ jobs:
 
       - id: gen
         env:
+          # GHA 러너는 UTC. 아래 python 의 date.today() 가 KST 기준 '24일' 판정을 하려면 TZ 지정 필요.
+          # (cron KST 08:00 = UTC 23:00 전날 → UTC date 기준으로는 하루 이른 값이 나옴)
+          TZ: Asia/Seoul
           EXCLUDE_INPUT: ${{ inputs.exclude }}
           FORCE_INPUT: ${{ inputs.force }}
         run: |
@@ -275,8 +280,9 @@ jobs:
   commit:
     needs: fetch
     # fetch 실패(chunk red) 시에도 실행 — 수집된 성공분은 커밋해야 함.
-    # setup 에서 count=0 으로 fetch 자체가 skip된 경우에도 이 잡이 돌 수 있는데, 이때는 artifact 없어서 자연 no-op.
-    if: always() && needs.setup.outputs.count != '0'
+    # setup 이 실패하면 outputs 가 비어 download-artifact 에서 에러 나므로 result=='success' 가드 추가.
+    # count=0 이면 fetch 잡이 skip 되고 aggregate 할 artifact 도 없으므로 commit 도 skip.
+    if: always() && needs.setup.result == 'success' && needs.setup.outputs.count != '0'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
