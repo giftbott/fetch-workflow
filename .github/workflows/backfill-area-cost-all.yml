@@ -49,9 +49,11 @@ jobs:
           with open('src/data/real-estate/comparison-targets.json') as f:
               all_targets = json.load(f)
           today = date.today()
-          # 오늘 기준 전월까지 최신 시도. k-apt에 아직 미공개면 fetch-area-cost.ts
-          # 의 alert 핸들러가 no-data 로 감지해 즉시 종료하므로 비용 적음.
-          m = today.month - 1
+          # k-apt 공개 스케줄 기반:
+          # - 이달 24일 이전(1~23일): 전전월까지 (예: 4/23 → 202602)
+          # - 24일 이후(24~말일): 전월까지 (예: 4/24 → 202603)
+          offset = 2 if today.day < 24 else 1
+          m = today.month - offset
           y = today.year
           while m <= 0:
               m += 12
