@@ -49,11 +49,9 @@ jobs:
           with open('src/data/real-estate/comparison-targets.json') as f:
               all_targets = json.load(f)
           today = date.today()
-          # k-apt 공개 스케줄 기반:
-          # - 이달 25일 이전(1~24일): 전전월이 최신 (예: 4/23 → 202602)
-          # - 25일 이후(25~말일): 전월이 공개됨 (예: 4/25 → 202603)
-          offset = 2 if today.day < 25 else 1
-          m = today.month - offset
+          # 오늘 기준 전월까지 최신 시도. k-apt에 아직 미공개면 fetch-area-cost.ts
+          # 의 alert 핸들러가 "데이터 없음"으로 감지해 즉시 종료하므로 비용 적음.
+          m = today.month - 1
           y = today.year
           while m <= 0:
               m += 12
@@ -66,9 +64,13 @@ jobs:
           for t in all_targets:
               if t['kaptCode'] in exclude:
                   continue
-              sy, sm = int(t['startMonth'][:4]), int(t['startMonth'][4:])
+              # 실제 수집 가능한 시작월 = max(startMonth, occuFirstDate).
+              # occuFirstDate 이전은 k-apt에 아예 데이터가 없으므로 시도 자체 생략.
+              sm_raw = t['startMonth']
+              occu = t.get('occuFirstDate') or sm_raw
+              effective_start = max(sm_raw, occu)
+              sy, sm = int(effective_start[:4]), int(effective_start[4:])
               # 각 단지별 endMonth가 설정되어 있으면 그것을, 아니면 전역 end_y/end_m 사용.
-              # (예: 201812에 보고 종료한 단지는 그 이후 월 시도 안 하도록)
               apt_end = t.get('endMonth')
               if apt_end:
                   apt_end_y, apt_end_m = int(apt_end[:4]), int(apt_end[4:])
