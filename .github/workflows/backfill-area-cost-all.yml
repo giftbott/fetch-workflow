@@ -67,11 +67,18 @@ jobs:
               if t['kaptCode'] in exclude:
                   continue
               sy, sm = int(t['startMonth'][:4]), int(t['startMonth'][4:])
+              # 각 단지별 endMonth가 설정되어 있으면 그것을, 아니면 전역 end_y/end_m 사용.
+              # (예: 201812에 보고 종료한 단지는 그 이후 월 시도 안 하도록)
+              apt_end = t.get('endMonth')
+              if apt_end:
+                  apt_end_y, apt_end_m = int(apt_end[:4]), int(apt_end[4:])
+              else:
+                  apt_end_y, apt_end_m = end_y, end_m
               y = sy
-              while y <= end_y:
-                  chunk_end_y = min(y + YEAR_STEP - 1, end_y)
+              while y <= apt_end_y:
+                  chunk_end_y = min(y + YEAR_STEP - 1, apt_end_y)
                   start_mm = sm if y == sy else 1
-                  end_mm = end_m if chunk_end_y == end_y else 12
+                  end_mm = apt_end_m if chunk_end_y == apt_end_y else 12
                   label = f'{y}' if y == chunk_end_y else f'{y}-{chunk_end_y}'
                   chunks.append({
                       'region': t['region'],
