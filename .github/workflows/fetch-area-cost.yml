@@ -152,7 +152,9 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 10
+      # 10 → 5: 2026-04-24 공개일에 26 chunks 가 rate-limit 연쇄 실패한 사례 대응.
+      # k-apt 가 동시 세션 수가 많으면 신규 세션 거부. 5면 안정 + 전체 수집 시간도 허용 범위.
+      max-parallel: 5
       matrix:
         chunk: ${{ fromJson(needs.setup.outputs.chunks) }}
     steps:
