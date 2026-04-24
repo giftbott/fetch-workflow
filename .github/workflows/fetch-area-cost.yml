@@ -262,10 +262,18 @@ jobs:
             echo "$FAIL_LIST" > "failures/${KAPT}-${YEAR_LABEL}.txt"
           fi
 
-          # 실패 1건이라도 있으면 chunk red.
+          # 실패 1건이라도 있으면 chunk red — 단, KST 24일 cron 은 예외.
+          # k-apt 가 24일 공개일에 단지마다 롤링으로 데이터 올림 → 24일 cron
+          # 실패는 정상적인 "아직 미준비" 케이스라 silent 처리. 25일+ cron 또는
+          # 수동 dispatch 는 실제 이슈로 판단해 exit 1.
           if [ "$FAILED" -gt 0 ]; then
-            echo "[ERROR] 실패 ${FAILED}건 → chunk 실패로 종료"
-            exit 1
+            KST_DAY=$(TZ=Asia/Seoul date +'%d')
+            if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" = "24" ]; then
+              echo "[INFO] 24일 cron 실패 ${FAILED}건 → k-apt 롤링 공개로 간주, silent 처리 (chunk green)"
+            else
+              echo "[ERROR] 실패 ${FAILED}건 → chunk 실패로 종료"
+              exit 1
+            fi
           fi
 
       - uses: actions/upload-artifact@v4
@@ -277,16 +285,6 @@ jobs:
             src/data/real-estate/area-cost/${{ matrix.chunk.kaptCode }}/
             failures/${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}.txt
           retention-days: 14
-          if-no-files-found: ignore
-
-      # 디버깅: 스크린샷/중간 파일 수집 (실패 케이스 원인 파악용).
-      # chunk 실패(exit 1) 시에도 업로드되도록 if: always().
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: debug-screenshots-${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}
-          path: scripts/.downloads/
-          retention-days: 7
           if-no-files-found: ignore
 
   commit:
@@ -338,8 +336,22 @@ jobs:
           commit_message: 'chore: update area-cost data'
           file_pattern: 'src/data/real-estate/area-cost/**/*.json'
 
-      - name: Telegram failure summary
+      # KST 24일 cron 실패는 silent 처리 — k-apt 롤링 공개로 인한 정상 케이스.
+      # 25일+ cron 또는 수동 dispatch 실패는 텔레그램 요약 + 워크플로우 red.
+      - name: Decide notification policy
+        id: policy
         if: steps.summary.outputs.total_fail != '0'
+        run: |
+          KST_DAY=$(TZ=Asia/Seoul date +'%d')
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" = "24" ]; then
+            echo "[INFO] 24일 cron 실패 ${{ steps.summary.outputs.total_fail }}건 → 알림 skip (다음 날 재시도)"
+            echo "alert=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "alert=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Telegram failure summary
+        if: steps.policy.outputs.alert == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -356,7 +368,7 @@ jobs:
             --data-urlencode "text=${MSG}"
 
       - name: Fail workflow if any month failed
-        if: steps.summary.outputs.total_fail != '0'
+        if: steps.policy.outputs.alert == 'true'
         run: |
           echo "::error::면적별 관리비 수집 실패 ${{ steps.summary.outputs.total_fail }}건 → 워크플로우 실패로 표시"
           exit 1
