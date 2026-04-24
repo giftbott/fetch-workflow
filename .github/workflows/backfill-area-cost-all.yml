@@ -1,5 +1,5 @@
 # 모든 비교 단지의 area-cost 과거 데이터 일괄 백필
-# - src/data/real-estate/comparison-targets.json 기반 매트릭스 실행
+# - src/data/real-estate/apartments.json 기반 매트릭스 실행
 # - 각 단지당 하나의 runner job (서로 다른 IP, rate-limit 분산 효과)
 # - max-parallel로 동시 실행 수 제한 (k-apt 부담 완화)
 # - 각 job은 해당 단지의 사용승인월 ~ 전월까지 순차 수집
@@ -34,7 +34,7 @@ jobs:
           repository: giftbott/wooridanji
           ref: feat/management-fee-comparison
           token: ${{ secrets.GH_PAT }}
-          sparse-checkout: src/data/real-estate/comparison-targets.json
+          sparse-checkout: src/data/real-estate/apartments.json
           sparse-checkout-cone-mode: false
       - id: gen
         env:
@@ -46,7 +46,7 @@ jobs:
           import json, os
           from datetime import date
           exclude = set(s.strip() for s in os.environ['EXCLUDE_INPUT'].split(',') if s.strip())
-          with open('src/data/real-estate/comparison-targets.json') as f:
+          with open('src/data/real-estate/apartments.json') as f:
               all_targets = json.load(f)
           today = date.today()
           # k-apt 공개 스케줄 기반:
