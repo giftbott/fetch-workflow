@@ -61,7 +61,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: fee-${{ matrix.complex.slug }}
-          path: src/data/complexes/${{ matrix.complex.slug }}/management-fee/
+          # upload-artifact@v4 는 단일 path 지정 시 상위 디렉토리 prefix 를 trim 하므로
+          # multi-line 으로 두 번째 path (실제 파일 없음) 를 같이 지정해 공통 prefix 를 repo
+          # root 로 유도 → artifact 안에 src/data/complexes/{slug}/management-fee/*.json 구조가
+          # 보존되고 commit job 의 file_pattern 과 매칭된다.
+          path: |
+            src/data/complexes/${{ matrix.complex.slug }}/management-fee/
+            failures-fee/${{ matrix.complex.slug }}.txt
           retention-days: 1
           if-no-files-found: ignore
 
