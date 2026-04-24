@@ -277,6 +277,16 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+      # 디버깅: 스크린샷/중간 파일 수집 (실패 케이스 원인 파악용).
+      # chunk 실패(exit 1) 시에도 업로드되도록 if: always().
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-screenshots-${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}
+          path: scripts/.downloads/
+          retention-days: 7
+          if-no-files-found: ignore
+
   commit:
     needs: fetch
     # fetch 실패(chunk red) 시에도 실행 — 수집된 성공분은 커밋해야 함.
