@@ -109,8 +109,23 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - name: Install Playwright browsers
-        run: npx playwright install chromium --with-deps
+
+      # Playwright 브라우저 바이너리 캐시 (~200MB, 잡당 1-2분 절약)
+      # OS 의존 라이브러리(apt 패키지)는 매번 설치 필요하지만 짧음.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright (full, cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright deps only (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
 
       - name: Generate month list
         id: months
