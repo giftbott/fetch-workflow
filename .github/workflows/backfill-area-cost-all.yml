@@ -115,6 +115,7 @@ jobs:
       - name: Cache Playwright browsers
         id: pw-cache
         uses: actions/cache@v4
+        continue-on-error: true
         with:
           path: ~/.cache/ms-playwright
           key: pw-browsers-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
