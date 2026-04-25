@@ -57,7 +57,7 @@
 
 > **롤링 공개**: K-apt 는 24일부터 데이터 공개를 시작하지만 등록 자체는 단지 관리사무소가 하므로 24~28일 분산. 25일 새벽 시점 17/42 미등록도 정상 범위.
 
-공휴일 = `HOLIDAYS_KR` 인라인 (yaml 두 곳, 매년 갱신 → [README](./README.md#매년-12월-말--holidays_kr-갱신)).
+공휴일 = `HOLIDAYS_KR` (workflow 최상단 env, 한 곳, 매년 갱신 → [README](./README.md#매년-12월-말--holidays_kr-갱신)).
 
 ## 메모
 

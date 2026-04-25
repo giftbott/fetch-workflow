@@ -48,14 +48,8 @@ gh run watch  <id>     --repo giftbott/fetch-workflow --exit-status
 
 ## 매년 12월 말 — `HOLIDAYS_KR` 갱신
 
-`fetch-area-cost.yml` 의 두 곳에 같은 `YYYY-MM-DD` 리스트:
-
-| 위치 | 용도 |
-|---|---|
-| `jobs.fetch.steps[Fetch missing months].run` | chunk silent 판정 |
-| `jobs.commit.steps[Decide notification policy].run` | 알림 silent 판정 |
-
-둘이 어긋나면 chunk silent 인데 알림 가거나 반대.
+`fetch-area-cost.yml` 최상단 `env.HOLIDAYS_KR` **한 곳**만 갱신.
+fetch / commit 두 잡 모두 같은 env 를 참조 (silent 판정 정책 일관성 자동 보장).
 
 ## 트러블슈팅
 

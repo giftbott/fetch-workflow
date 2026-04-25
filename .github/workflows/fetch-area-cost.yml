@@ -25,6 +25,14 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
+env:
+  # 매년 12월 말 갱신 — k-apt 롤링 윈도우 silent 판정용 (KST 24·25 무조건, 26 주말·공휴일).
+  # fetch / commit 두 잡 모두 이 값을 그대로 사용 (단일 source of truth).
+  HOLIDAYS_KR: '2026-01-01 2026-02-16 2026-02-17 2026-02-18 2026-03-01 2026-03-02 2026-05-05 2026-05-24 2026-05-25 2026-06-06 2026-08-15 2026-09-24 2026-09-25 2026-09-26 2026-10-03 2026-10-09 2026-12-25'
+
 concurrency:
   group: area-cost
   cancel-in-progress: false
@@ -193,6 +201,7 @@ jobs:
           NAME: ${{ matrix.chunk.kaptName }}
           YEAR_LABEL: ${{ matrix.chunk.yearLabel }}
           MISSING_MONTHS: ${{ matrix.chunk.missingMonths }}
+          FORCE: ${{ inputs.force }}
         run: |
           DIR="src/data/real-estate/area-cost/$KAPT"
           mkdir -p "$DIR" failures
@@ -213,8 +222,9 @@ jobs:
               continue
             fi
             TARGET="$DIR/${M}.json"
-            if [ -f "$TARGET" ]; then
+            if [ -f "$TARGET" ] && [ "$FORCE" != "true" ]; then
               # setup 이후 누군가 커밋했을 edge case. skip.
+              # FORCE=true (workflow_dispatch) 면 재수집 위해 통과.
               continue
             fi
             echo ""
@@ -264,12 +274,11 @@ jobs:
           # - KST 24·25일: 무조건 silent (롤링 공개 진행 중)
           # - KST 26일: 주말 또는 공휴일이면 silent (평일은 정상 알림)
           # - 27일 이후 또는 수동 dispatch: 알림
-          # 공휴일은 매년 인라인 리스트 (HOLIDAYS_KR) — 새해 시작 전에 갱신 필요.
+          # 공휴일 리스트는 워크플로우 최상단 env.HOLIDAYS_KR — 매년 갱신 (한 곳만).
           if [ "$FAILED" -gt 0 ]; then
             KST_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')
             KST_DAY=$(TZ=Asia/Seoul date +'%d')
             KST_DOW=$(TZ=Asia/Seoul date +'%u')  # 1=월 ... 7=일
-            HOLIDAYS_KR="2026-01-01 2026-02-16 2026-02-17 2026-02-18 2026-03-01 2026-03-02 2026-05-05 2026-05-24 2026-05-25 2026-06-06 2026-08-15 2026-09-24 2026-09-25 2026-09-26 2026-10-03 2026-10-09 2026-12-25"
             SILENT=false
             if [ "${{ github.event_name }}" = "schedule" ]; then
               if [ "$KST_DAY" = "24" ] || [ "$KST_DAY" = "25" ]; then
@@ -358,7 +367,6 @@ jobs:
           KST_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')
           KST_DAY=$(TZ=Asia/Seoul date +'%d')
           KST_DOW=$(TZ=Asia/Seoul date +'%u')
-          HOLIDAYS_KR="2026-01-01 2026-02-16 2026-02-17 2026-02-18 2026-03-01 2026-03-02 2026-05-05 2026-05-24 2026-05-25 2026-06-06 2026-08-15 2026-09-24 2026-09-25 2026-09-26 2026-10-03 2026-10-09 2026-12-25"
           SILENT=false
           if [ "${{ github.event_name }}" = "schedule" ]; then
             if [ "$KST_DAY" = "24" ] || [ "$KST_DAY" = "25" ]; then
