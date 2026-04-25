@@ -11,6 +11,9 @@ on:
     - cron: '0 22 * * *' # 매일 07:00 KST (UTC 22:00)
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: data-commit
   cancel-in-progress: false
@@ -47,15 +50,14 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - name: Fetch real estate data
-        run: |
-          COMPLEX_SLUG=${{ matrix.complex.slug }} \
-          APT_NAME=${{ matrix.complex.name }} \
-          APT_REGION_CODE=${{ matrix.complex.regionCode }} \
-          npx tsx scripts/fetch-real-estate.ts
+        run: npx tsx scripts/fetch-real-estate.ts
         env:
           OPEN_DATA_API_KEY: ${{ secrets.OPEN_DATA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          COMPLEX_SLUG: ${{ matrix.complex.slug }}
+          APT_NAME: ${{ matrix.complex.name }}
+          APT_REGION_CODE: ${{ matrix.complex.regionCode }}
       - uses: actions/upload-artifact@v4
         with:
           name: real-estate-${{ matrix.complex.slug }}

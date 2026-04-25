@@ -11,6 +11,9 @@ on:
     - cron: '50 22 * * *' # 07:50 KST (UTC 22:50 전날)
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: data-commit
   cancel-in-progress: false

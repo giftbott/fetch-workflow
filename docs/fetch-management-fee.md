@@ -29,7 +29,7 @@ UI "단지 공통" 탭 전용 데이터 (장충금/에너지/개별/공용관리
   ```yaml
   path: |
     src/data/complexes/${{ matrix.complex.slug }}/management-fee/
-    failures-fee/${{ matrix.complex.slug }}.txt   # dummy, 실제 안 만듦
+    _artifact_root_anchor   # 실존 X, LCA 를 repo root 로 끌어올리기용 marker
   ```
 
 ---
