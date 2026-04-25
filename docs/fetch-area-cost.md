@@ -6,7 +6,7 @@
 |---|---|
 | 파일 | `.github/workflows/fetch-area-cost.yml` |
 | 트리거 | `schedule: '0 23 23-27 * *'` (KST 08:00, 매달 24~28일) + `workflow_dispatch` (`exclude`, `force`) |
-| 데이터 소스 | k-apt.go.kr (인증 불요, Playwright + HTTP hybrid → Excel → JSON) |
+| 데이터 소스 | K-apt 웹 (https://www.k-apt.go.kr, 인증 불요, Playwright + HTTP hybrid → Excel → JSON) |
 | 스크립트 | `scripts/fetch-area-cost.ts` (wooridanji) |
 | 대상 단지 | `apartments.json` 의 42 단지 (필요 시 `exclude` 입력으로 제외) |
 | 출력 | `src/data/real-estate/area-cost/{kaptCode}/{YYYYMM}.json` |
@@ -54,7 +54,9 @@
 | 27·28일 | 항상 알림 (실제 이슈 가능성) |
 | 수동 dispatch | 항상 알림 |
 
-공휴일은 yaml 안 인라인 `HOLIDAYS_KR` (2026 리스트). **매년 12월 말 갱신 필요** (chunk fail 분기 + 알림 분기 양쪽 동일 리스트).
+> **롤링 공개**: K-apt 가 매월 24일부터 데이터 공개를 시작하지만, 등록은 **각 단지 관리사무소가 직접** 하므로 단지마다 등록 시점이 24~28일 사이로 분산된다. 24·25일 새벽까지 17/42 단지 미등록도 흔하다 — 우리 시스템 버그가 아니라 정상 운영 상태. 그래서 25일까지 silent, 26일은 평일에만 알림으로 타협.
+
+공휴일은 yaml 안 인라인 `HOLIDAYS_KR` (2026 리스트). **매년 12월 말 갱신 필요** — 자세한 갱신 가이드는 [README → 매년 12월 말 할 일](./README.md#매년-12월-말-할-일).
 
 ## 특이사항
 
@@ -62,3 +64,7 @@
 - **Playwright 브라우저 cache** 활용 (cache miss 시 `playwright install --with-deps` 추가 시간).
 - k-apt 가 단지/월 데이터를 안 올렸으면 페이지 alert: `관리비 데이터가 존재해야 엑셀 다운로드가 가능합니다`. 스크립트가 이 alert 을 감지해 fail 처리. 25일 새벽까지도 17/42 미공개인 경우 흔하다 (silent 윈도우 25일 추가 이유).
 - 새 코드와 데이터 모두 wooridanji `main` 에 있음. 과거에 yml 에 `ref: feat/management-fee-comparison` 가 있었으나 머지 완료로 제거됨.
+
+---
+
+[← README](./README.md)

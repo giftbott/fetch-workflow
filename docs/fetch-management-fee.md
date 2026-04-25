@@ -31,4 +31,8 @@
     src/data/complexes/${{ matrix.complex.slug }}/management-fee/
     failures-fee/${{ matrix.complex.slug }}.txt
   ```
-  단일 path 면 `upload-artifact@v4` 가 prefix 를 trim 해서 commit 의 `file_pattern` 매칭 실패 → "Nothing to commit" 으로 끝나는 버그가 있었다 (수정 완료).
+  단일 path 면 `upload-artifact@v4` 가 prefix 를 trim 해서 commit 의 `file_pattern` 매칭 실패 → "Nothing to commit" 으로 끝나는 버그가 있었다 (수정 완료). 두 번째 path 는 실제 파일 안 만듦 (`if-no-files-found: ignore` 가 흡수). 자세한 동작은 [README](./README.md#공통-사항) 의 "artifact path 트릭" 참조.
+
+---
+
+[← README](./README.md)
