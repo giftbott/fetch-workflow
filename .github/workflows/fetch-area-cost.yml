@@ -260,14 +260,28 @@ jobs:
             echo "$FAIL_LIST" > "failures/${KAPT}-${YEAR_LABEL}.txt"
           fi
 
-          # 실패 1건이라도 있으면 chunk red — 단, KST 24일 cron 은 예외.
-          # k-apt 가 24일 공개일에 단지마다 롤링으로 데이터 올림 → 24일 cron
-          # 실패는 정상적인 "아직 미준비" 케이스라 silent 처리. 25일+ cron 또는
-          # 수동 dispatch 는 실제 이슈로 판단해 exit 1.
+          # 실패 1건이라도 있으면 chunk red. 단, k-apt 롤링 공개 윈도우는 silent:
+          # - KST 24·25일: 무조건 silent (롤링 공개 진행 중)
+          # - KST 26일: 주말 또는 공휴일이면 silent (평일은 정상 알림)
+          # - 27일 이후 또는 수동 dispatch: 알림
+          # 공휴일은 매년 인라인 리스트 (HOLIDAYS_KR) — 새해 시작 전에 갱신 필요.
           if [ "$FAILED" -gt 0 ]; then
+            KST_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')
             KST_DAY=$(TZ=Asia/Seoul date +'%d')
-            if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" = "24" ]; then
-              echo "[INFO] 24일 cron 실패 ${FAILED}건 → k-apt 롤링 공개로 간주, silent 처리 (chunk green)"
+            KST_DOW=$(TZ=Asia/Seoul date +'%u')  # 1=월 ... 7=일
+            HOLIDAYS_KR="2026-01-01 2026-02-16 2026-02-17 2026-02-18 2026-03-01 2026-03-02 2026-05-05 2026-05-24 2026-05-25 2026-06-06 2026-08-15 2026-09-24 2026-09-25 2026-09-26 2026-10-03 2026-10-09 2026-12-25"
+            SILENT=false
+            if [ "${{ github.event_name }}" = "schedule" ]; then
+              if [ "$KST_DAY" = "24" ] || [ "$KST_DAY" = "25" ]; then
+                SILENT=true
+              elif [ "$KST_DAY" = "26" ]; then
+                if [ "$KST_DOW" -ge 6 ] || echo " $HOLIDAYS_KR " | grep -q " $KST_DATE "; then
+                  SILENT=true
+                fi
+              fi
+            fi
+            if [ "$SILENT" = "true" ]; then
+              echo "[INFO] $KST_DATE 실패 ${FAILED}건 → k-apt 롤링/주말·공휴일 윈도우, silent (chunk green)"
             else
               echo "[ERROR] 실패 ${FAILED}건 → chunk 실패로 종료"
               exit 1
@@ -333,15 +347,30 @@ jobs:
           commit_message: 'chore: update area-cost data'
           file_pattern: 'src/data/real-estate/area-cost/**/*.json'
 
-      # KST 24일 cron 실패는 silent 처리 — k-apt 롤링 공개로 인한 정상 케이스.
-      # 25일+ cron 또는 수동 dispatch 실패는 텔레그램 요약 + 워크플로우 red.
+      # k-apt 롤링 공개 윈도우는 알림 skip (chunk silent 정책과 같은 조건):
+      # - KST 24·25일: 무조건 silent
+      # - KST 26일: 주말 또는 공휴일이면 silent (평일은 알림)
+      # - 27일+ 또는 수동 dispatch: 알림
       - name: Decide notification policy
         id: policy
         if: steps.summary.outputs.total_fail != '0'
         run: |
+          KST_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')
           KST_DAY=$(TZ=Asia/Seoul date +'%d')
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" = "24" ]; then
-            echo "[INFO] 24일 cron 실패 ${{ steps.summary.outputs.total_fail }}건 → 알림 skip (다음 날 재시도)"
+          KST_DOW=$(TZ=Asia/Seoul date +'%u')
+          HOLIDAYS_KR="2026-01-01 2026-02-16 2026-02-17 2026-02-18 2026-03-01 2026-03-02 2026-05-05 2026-05-24 2026-05-25 2026-06-06 2026-08-15 2026-09-24 2026-09-25 2026-09-26 2026-10-03 2026-10-09 2026-12-25"
+          SILENT=false
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "$KST_DAY" = "24" ] || [ "$KST_DAY" = "25" ]; then
+              SILENT=true
+            elif [ "$KST_DAY" = "26" ]; then
+              if [ "$KST_DOW" -ge 6 ] || echo " $HOLIDAYS_KR " | grep -q " $KST_DATE "; then
+                SILENT=true
+              fi
+            fi
+          fi
+          if [ "$SILENT" = "true" ]; then
+            echo "[INFO] $KST_DATE 실패 ${{ steps.summary.outputs.total_fail }}건 → 롤링/주말·공휴일 윈도우, 알림 skip"
             echo "alert=false" >> "$GITHUB_OUTPUT"
           else
             echo "alert=true" >> "$GITHUB_OUTPUT"
