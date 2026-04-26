@@ -1,8 +1,11 @@
-# 관리비 상세 스냅샷 수집
-# - 소스: 공공데이터포털 REST API (에너지, 장충금, 개별사용료, 공용관리비 등 26개 엔드포인트)
-# - 대상: 1개월 전 데이터
+# 관리비 상세 스냅샷 수집 (공공데이터 OpenAPI 26 endpoints, 단지 공통 탭 데이터)
+# - 소스: 공공데이터포털 REST API (에너지, 장충금, 개별사용료, 공용관리비 등 26개)
+# - 대상: apartments.json 의 42단지 — 각 단지 area-cost 디렉토리의 최초 월부터 전월까지 누락 월
 # - 저장: src/data/real-estate/management-fee/{kaptCode}/YYYYMM.json (giftbott/wooridanji)
 # - 용도: 단지 공통 탭 (장충금, 에너지 비용, 공용관리비 상세)
+# - 모드: cron(매월 1개월 전 idempotent) + workflow_dispatch(region 필터·force backfill)
+# - setup 잡이 각 단지의 area-cost 시작월 + 기존 mgmt-fee 파일을 보고 "누락 월만" 매트릭스에 emit
+# - 실패 1건이라도 발생 시: chunk exit 1 + 워크플로우 red + 텔레그램 요약 알림 1건
 
 name: Fetch Management Fee Snapshot
 
@@ -10,35 +13,163 @@ on:
   schedule:
     - cron: '0 0 23-30 * *' # KST 09:00, 매달 23~30일
   workflow_dispatch:
+    inputs:
+      region:
+        description: '필터링할 region (송파/성남/하남). 비우면 전체.'
+        required: false
+        default: ''
+      exclude:
+        description: '제외할 kaptCode (쉼표로 구분). region 필터 후 추가 적용.'
+        required: false
+        default: ''
+      force:
+        description: '이미 수집된 월도 재수집 (기본 false)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: data-commit
+  group: management-fee
   cancel-in-progress: false
 
 jobs:
   setup:
     runs-on: ubuntu-latest
     outputs:
-      complexes: ${{ steps.load.outputs.complexes }}
+      chunks: ${{ steps.gen.outputs.chunks }}
+      count: ${{ steps.gen.outputs.count }}
     steps:
+      # apartments.json + 기존 area-cost (시작월 판정용) + 기존 management-fee (누락 월 판정용).
+      # 모두 sparse-checkout 으로 최소만 받음.
       - uses: actions/checkout@v5
         with:
           repository: giftbott/wooridanji
           token: ${{ secrets.GH_PAT }}
-          sparse-checkout: complexes.json
+          sparse-checkout: |
+            src/data/real-estate/apartments.json
+            src/data/real-estate/area-cost
+            src/data/real-estate/management-fee
           sparse-checkout-cone-mode: false
-      - id: load
-        run: echo "complexes=$(jq -c '.' complexes.json)" >> $GITHUB_OUTPUT
+
+      - id: gen
+        env:
+          # GHA 러너는 UTC. python date.today() 가 KST '24일' 판정하려면 TZ 지정.
+          TZ: Asia/Seoul
+          REGION_INPUT: ${{ inputs.region }}
+          EXCLUDE_INPUT: ${{ inputs.exclude }}
+          FORCE_INPUT: ${{ inputs.force }}
+        run: |
+          CHUNKS=$(python3 <<'PYEOF'
+          import json, os
+          from datetime import date
+          from pathlib import Path
+
+          region_filter = os.environ.get('REGION_INPUT', '').strip()
+          exclude = {s.strip() for s in os.environ.get('EXCLUDE_INPUT', '').split(',') if s.strip()}
+          force = os.environ.get('FORCE_INPUT', 'false') == 'true'
+          area_cost_root = Path('src/data/real-estate/area-cost')
+          mf_root = Path('src/data/real-estate/management-fee')
+
+          with open('src/data/real-estate/apartments.json') as f:
+              apartments = json.load(f)
+
+          # 전월 / 전전월 판정 — area-cost 와 동일한 기준일 (24일).
+          # OpenAPI 공개 시점은 K-apt 와 다를 수 있으나, 이르면 empty 로 빠지고 다음 cron 자연 회복.
+          today = date.today()
+          offset = 2 if today.day < 24 else 1
+          m = today.month - offset
+          y = today.year
+          while m <= 0:
+              m += 12
+              y -= 1
+          global_end_y, global_end_m = y, m
+
+          def existing_months(d: Path):
+              if not d.exists():
+                  return set()
+              return {f.stem for f in d.glob('*.json') if f.stem.isdigit() and len(f.stem) == 6}
+
+          def area_cost_start(kapt: str):
+              # 단지의 mgmt-fee 시작월 = area-cost 디렉토리 최초 월 (사용승인일 기준).
+              # area-cost 데이터가 없으면 mgmt-fee 도 시도하지 않음.
+              months = sorted(existing_months(area_cost_root / kapt))
+              return months[0] if months else None
+
+          def month_range(start, end):
+              sy, sm = int(start[:4]), int(start[4:])
+              ey, em = int(end[:4]), int(end[4:])
+              out = []
+              while (sy, sm) <= (ey, em):
+                  out.append(f'{sy:04d}{sm:02d}')
+                  sm += 1
+                  if sm > 12:
+                      sm = 1; sy += 1
+              return out
+
+          # 2년 단위 chunk (matrix 256 한도). 단지당 평균 80월 → 약 3 chunk → 42단지 × 3 = ~126.
+          YEAR_STEP = 2
+          chunks = []
+          for apt in apartments:
+              if region_filter and apt['region'] != region_filter:
+                  continue
+              if apt['kaptCode'] in exclude:
+                  continue
+
+              start = area_cost_start(apt['kaptCode'])
+              if not start:
+                  # area-cost 데이터 없음 → mgmt-fee 시작월 판정 불가. skip.
+                  continue
+
+              # 단지별 endMonth 우선, 없으면 전역 end (전월/전전월).
+              apt_end = apt.get('endMonth')
+              if apt_end:
+                  apt_end_y, apt_end_m = int(apt_end[:4]), int(apt_end[4:])
+              else:
+                  apt_end_y, apt_end_m = global_end_y, global_end_m
+
+              sy, sm = int(start[:4]), int(start[4:])
+              existing = set() if force else existing_months(mf_root / apt['kaptCode'])
+              yy = sy
+              while yy <= apt_end_y:
+                  chunk_end_y = min(yy + YEAR_STEP - 1, apt_end_y)
+                  start_mm = sm if yy == sy else 1
+                  end_mm = apt_end_m if chunk_end_y == apt_end_y else 12
+                  chunk_start = f'{yy:04d}{start_mm:02d}'
+                  chunk_end = f'{chunk_end_y:04d}{end_mm:02d}'
+                  all_months = month_range(chunk_start, chunk_end)
+                  missing = [mo for mo in all_months if mo not in existing]
+                  if missing:
+                      label = f'{yy}' if yy == chunk_end_y else f'{yy}-{chunk_end_y}'
+                      chunks.append({
+                          'region': apt['region'],
+                          'kaptCode': apt['kaptCode'],
+                          'kaptName': apt['kaptName'],
+                          'yearLabel': label,
+                          'missingMonths': ' '.join(missing),
+                      })
+                  yy += YEAR_STEP
+
+          print(json.dumps(chunks, ensure_ascii=False))
+          PYEOF
+          )
+          COUNT=$(echo "$CHUNKS" | python3 -c "import json, sys; print(len(json.load(sys.stdin)))")
+          echo "chunks=$CHUNKS" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "[INFO] 누락 chunk: $COUNT개"
 
   fetch:
     needs: setup
+    if: needs.setup.outputs.count != '0'
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     strategy:
+      fail-fast: false
+      # 공공 OpenAPI는 IP 기준 rate-limit 보단 일 한도 부담. 5는 보수적, 필요시 상향.
+      max-parallel: 5
       matrix:
-        complex: ${{ fromJson(needs.setup.outputs.complexes) }}
+        chunk: ${{ fromJson(needs.setup.outputs.chunks) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -49,35 +180,106 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - name: Fetch management fee
-        run: |
-          MONTH=$(date -d '1 month ago' +'%Y%m')
-          TARGET="src/data/real-estate/management-fee/${KAPT_CODE}/${MONTH}.json"
-          if [ -f "$TARGET" ]; then
-            echo "[INFO] 이미 스냅샷 존재: ${TARGET} (스킵)"
-            exit 0
-          fi
-          npm run fetch:management-fee -- "$MONTH" "$KAPT_CODE"
+
+      - name: Fetch missing months
         env:
+          KAPT: ${{ matrix.chunk.kaptCode }}
+          NAME: ${{ matrix.chunk.kaptName }}
+          YEAR_LABEL: ${{ matrix.chunk.yearLabel }}
+          MISSING_MONTHS: ${{ matrix.chunk.missingMonths }}
+          FORCE: ${{ inputs.force }}
           OPEN_DATA_API_KEY: ${{ secrets.OPEN_DATA_API_KEY }}
-          COMPLEX_SLUG: ${{ matrix.complex.slug }}
-          KAPT_CODE: ${{ matrix.complex.kaptCode }}
+        run: |
+          # API 키 가드 — 누락이면 silent fail (모든 응답 빈 객체) 가능. 명시 실패 처리.
+          if [ -z "$OPEN_DATA_API_KEY" ]; then
+            echo "::error::OPEN_DATA_API_KEY 누락"
+            exit 1
+          fi
+
+          DIR="src/data/real-estate/management-fee/$KAPT"
+          mkdir -p "$DIR" failures
+
+          SUCCESS=0
+          FAILED=0
+          EMPTY=0
+          CONSECUTIVE_FAIL=0
+          BREAK_EARLY=false
+          FAIL_LIST=""
+
+          echo "[INFO] $NAME ($KAPT) $YEAR_LABEL: $(echo $MISSING_MONTHS | wc -w)개월 시도"
+
+          for M in $MISSING_MONTHS; do
+            if [ "$BREAK_EARLY" = true ]; then
+              FAILED=$((FAILED+1))
+              FAIL_LIST="$FAIL_LIST $M"
+              continue
+            fi
+            TARGET="$DIR/${M}.json"
+            if [ -f "$TARGET" ] && [ "$FORCE" != "true" ]; then
+              # setup 이후 누군가 커밋했을 edge case. force=true 면 통과해서 재수집.
+              continue
+            fi
+            echo ""
+            echo "[FETCH] $KAPT $M"
+            set +e
+            KAPTCODE=$KAPT npx tsx scripts/fetch-management-fee.ts "$M"
+            RC=$?
+            set -e
+
+            if [ "$RC" -eq 0 ]; then
+              if [ -f "$TARGET" ]; then
+                SUCCESS=$((SUCCESS+1))
+                CONSECUTIVE_FAIL=0
+                # 단지·월 사이 5~15초 분산 (일 한도 부담 완화).
+                sleep $((RANDOM % 11 + 5))
+              else
+                # exit 0 + 파일 없음 = OpenAPI 미공개 (empty). 실패 카운트 안 함, 짧게 대기.
+                EMPTY=$((EMPTY+1))
+                CONSECUTIVE_FAIL=0
+                sleep 3
+              fi
+            else
+              # 진짜 실패 (exception, network, auth 등).
+              FAILED=$((FAILED+1))
+              CONSECUTIVE_FAIL=$((CONSECUTIVE_FAIL+1))
+              FAIL_LIST="$FAIL_LIST $M"
+              echo "[WARN] 실패 (누적 $FAILED, 연속 $CONSECUTIVE_FAIL), 60초 휴식..."
+              sleep 60
+              if [ "$CONSECUTIVE_FAIL" -ge 3 ]; then
+                echo "[WARN] 연속 실패 3회 → chunk 조기 종료, 남은 월 실패 처리"
+                BREAK_EARLY=true
+              fi
+            fi
+          done
+
+          echo ""
+          echo "=== $NAME ($KAPT) ${YEAR_LABEL} ==="
+          echo "성공: $SUCCESS / 미공개: $EMPTY / 실패: $FAILED"
+          [ -n "$FAIL_LIST" ] && echo "실패월:$FAIL_LIST"
+
+          # 실패 기록 (commit 잡이 집계해서 워크플로우 단위 텔레그램 1건).
+          if [ -n "$FAIL_LIST" ]; then
+            echo "$FAIL_LIST" > "failures/${KAPT}-${YEAR_LABEL}.txt"
+            echo "[ERROR] 실패 ${FAILED}건 → chunk red"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: fee-${{ matrix.complex.slug }}
-          # upload-artifact@v4 는 단일 path 지정 시 상위 디렉토리 prefix 를 trim 하므로
-          # multi-line 으로 두 번째 더미 path 를 같이 지정해 공통 prefix 를 repo root 로
-          # 끌어올림 → artifact 안에 src/data/real-estate/management-fee/{kaptCode}/*.json 구조가
-          # 보존되고 commit job 의 file_pattern 과 매칭된다.
-          # _artifact_root_anchor 는 실존하지 않는 marker (if-no-files-found: ignore 로 무시).
+          name: fee-${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}
           path: |
-            src/data/real-estate/management-fee/${{ matrix.complex.kaptCode }}/
-            _artifact_root_anchor
-          retention-days: 1
+            src/data/real-estate/management-fee/${{ matrix.chunk.kaptCode }}/
+            failures/${{ matrix.chunk.kaptCode }}-${{ matrix.chunk.yearLabel }}.txt
+          retention-days: 14
           if-no-files-found: ignore
 
   commit:
-    needs: fetch
+    needs: [setup, fetch]
+    # fetch 실패(chunk red) 시에도 실행 — 수집된 성공분은 커밋해야 함.
+    # setup 실패 시 outputs 비어 download-artifact 에서 에러 → result=='success' 가드.
+    # count=0 이면 fetch 잡 skip 되고 aggregate artifact 없으므로 commit 도 skip.
+    if: always() && needs.setup.result == 'success' && needs.setup.outputs.count != '0'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -88,7 +290,55 @@ jobs:
         with:
           pattern: fee-*
           merge-multiple: true
+
+      - name: Summarize failures
+        id: summary
+        run: |
+          TOTAL_FAIL=0
+          SUMMARY=""
+          if [ -d failures ]; then
+            for f in failures/*.txt; do
+              [ -f "$f" ] || continue
+              STEM=$(basename "$f" .txt)
+              MONTHS=$(cat "$f")
+              COUNT=$(echo "$MONTHS" | wc -w)
+              TOTAL_FAIL=$((TOTAL_FAIL + COUNT))
+              SUMMARY="${SUMMARY}\n${STEM}:${MONTHS}"
+            done
+          fi
+          echo "[요약] 실패 월 총: $TOTAL_FAIL"
+          [ -n "$SUMMARY" ] && echo -e "$SUMMARY"
+          echo "total_fail=$TOTAL_FAIL" >> "$GITHUB_OUTPUT"
+          {
+            echo "summary<<SUMEOF"
+            echo -e "$SUMMARY"
+            echo "SUMEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: 'chore: update management fee snapshot'
           file_pattern: 'src/data/real-estate/management-fee/**/*.json'
+
+      - name: Telegram failure summary
+        if: steps.summary.outputs.total_fail != '0'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TOTAL: ${{ steps.summary.outputs.total_fail }}
+          DETAIL: ${{ steps.summary.outputs.summary }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "[INFO] Telegram 토큰 미설정 → 알림 skip"
+            exit 0
+          fi
+          MSG=$(printf '⚠️ 관리비 스냅샷 수집 실패 %s건\n%s' "$TOTAL" "$DETAIL")
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}"
+
+      - name: Fail workflow if any month failed
+        if: steps.summary.outputs.total_fail != '0'
+        run: |
+          echo "::error::관리비 스냅샷 수집 실패 ${{ steps.summary.outputs.total_fail }}건 → 워크플로우 실패로 표시"
+          exit 1
