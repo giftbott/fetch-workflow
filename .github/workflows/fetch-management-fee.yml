@@ -1,17 +1,19 @@
 # 관리비 상세 스냅샷 수집 (공공데이터 OpenAPI 26 endpoints, 단지 공통 탭 데이터)
 # - 소스: 공공데이터포털 REST API (에너지, 장충금, 개별사용료, 공용관리비 등 26개)
-# - 대상: apartments.json 의 42단지 — 각 단지 area-cost 디렉토리의 최초 월부터 전월까지 누락 월
+# - 대상: apartments.json 의 42단지 — 각 단지 max(area-cost 최초 월, occuFirstDate) 부터 전월까지 누락 월
 # - 저장: src/data/real-estate/management-fee/{kaptCode}/YYYYMM.json (giftbott/wooridanji)
 # - 용도: 단지 공통 탭 (장충금, 에너지 비용, 공용관리비 상세)
-# - 모드: cron(매월 1개월 전 idempotent) + workflow_dispatch(region 필터·force backfill)
-# - setup 잡이 각 단지의 area-cost 시작월 + 기존 mgmt-fee 파일을 보고 "누락 월만" 매트릭스에 emit
-# - 실패 1건이라도 발생 시: chunk exit 1 + 워크플로우 red + 텔레그램 요약 알림 1건
+# - 모드: cron(KST 23~말일 09:00, idempotent) + workflow_dispatch(region 필터·force backfill)
+# - setup 잡이 각 단지의 시작월 + 기존 mgmt-fee 파일을 보고 "누락 월만" 매트릭스에 emit
+# - OpenAPI 미공개(파일 미생성)는 EMPTY 카운트만 — chunk red 안 시킴
+# - 진짜 실패 1건이라도 발생 시: chunk exit 1 + 워크플로우 red + 텔레그램 요약 1건
+# - silent 윈도우: KST 23·24·25 (롤링 공개 진행 중, 미공개 일상) — 그 외 알림
 
 name: Fetch Management Fee Snapshot
 
 on:
   schedule:
-    - cron: '0 0 23-30 * *' # KST 09:00, 매달 23~30일
+    - cron: '0 0 23-31 * *' # KST 09:00, 매달 23~말일 (28-day Feb 등 짧은 달은 28까지만 fire)
   workflow_dispatch:
     inputs:
       region:
@@ -92,8 +94,7 @@ jobs:
               return {f.stem for f in d.glob('*.json') if f.stem.isdigit() and len(f.stem) == 6}
 
           def area_cost_start(kapt: str):
-              # 단지의 mgmt-fee 시작월 = area-cost 디렉토리 최초 월 (사용승인일 기준).
-              # area-cost 데이터가 없으면 mgmt-fee 도 시도하지 않음.
+              # area-cost 디렉토리 최초 월 — 다만 입주 전 빈 데이터 파일이 있을 수 있어 occuFirstDate 와 max 처리.
               months = sorted(existing_months(area_cost_root / kapt))
               return months[0] if months else None
 
@@ -117,10 +118,14 @@ jobs:
               if apt['kaptCode'] in exclude:
                   continue
 
-              start = area_cost_start(apt['kaptCode'])
-              if not start:
+              ac_start = area_cost_start(apt['kaptCode'])
+              if not ac_start:
                   # area-cost 데이터 없음 → mgmt-fee 시작월 판정 불가. skip.
                   continue
+              # 입주 전 area-cost 빈 데이터 파일이 있을 수 있음 (예: A10023922 의 202201).
+              # occuFirstDate 가 ac_start 보다 늦으면 그 시점부터 시도 — OpenAPI 미공개 false-positive 방지.
+              occu = apt.get('occuFirstDate') or ac_start
+              start = max(ac_start, occu)
 
               # 단지별 endMonth 우선, 없으면 전역 end (전월/전전월).
               apt_end = apt.get('endMonth')
@@ -260,8 +265,22 @@ jobs:
           # 실패 기록 (commit 잡이 집계해서 워크플로우 단위 텔레그램 1건).
           if [ -n "$FAIL_LIST" ]; then
             echo "$FAIL_LIST" > "failures/${KAPT}-${YEAR_LABEL}.txt"
-            echo "[ERROR] 실패 ${FAILED}건 → chunk red"
-            exit 1
+          fi
+
+          # 진짜 실패(FAILED) > 0 시 chunk red. 단 KST 23·24·25 silent (OpenAPI 도 미공개 분포 큼).
+          # OpenAPI 미공개(EMPTY)는 항상 silent — 카운트만 하고 chunk red 안 시킴 (이미 위에서 분리됨).
+          if [ "$FAILED" -gt 0 ]; then
+            KST_DAY=$(TZ=Asia/Seoul date +'%d')
+            SILENT=false
+            if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" -ge 23 ] && [ "$KST_DAY" -le 25 ]; then
+              SILENT=true
+            fi
+            if [ "$SILENT" = "true" ]; then
+              echo "[INFO] KST $KST_DAY일 — 23·24·25 silent 윈도우, chunk green ($FAILED건 보류)"
+            else
+              echo "[ERROR] 실패 ${FAILED}건 → chunk 실패로 종료"
+              exit 1
+            fi
           fi
 
       - uses: actions/upload-artifact@v4
@@ -320,8 +339,26 @@ jobs:
           commit_message: 'chore: update management fee snapshot'
           file_pattern: 'src/data/real-estate/management-fee/**/*.json'
 
-      - name: Telegram failure summary
+      # silent 윈도우: KST 23·24·25 무조건 silent (OpenAPI 도 미공개 분포 큼).
+      # KST 26일+ 또는 dispatch: 알림.
+      - name: Decide notification policy
+        id: policy
         if: steps.summary.outputs.total_fail != '0'
+        run: |
+          KST_DAY=$(TZ=Asia/Seoul date +'%d')
+          SILENT=false
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" -ge 23 ] && [ "$KST_DAY" -le 25 ]; then
+            SILENT=true
+          fi
+          if [ "$SILENT" = "true" ]; then
+            echo "[INFO] KST $KST_DAY일 — 23·24·25 silent 윈도우, 알림 skip"
+            echo "alert=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "alert=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Telegram failure summary
+        if: steps.policy.outputs.alert == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -338,7 +375,7 @@ jobs:
             --data-urlencode "text=${MSG}"
 
       - name: Fail workflow if any month failed
-        if: steps.summary.outputs.total_fail != '0'
+        if: steps.policy.outputs.alert == 'true'
         run: |
           echo "::error::관리비 스냅샷 수집 실패 ${{ steps.summary.outputs.total_fail }}건 → 워크플로우 실패로 표시"
           exit 1

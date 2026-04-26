@@ -2,18 +2,20 @@
 # - 소스: k-apt.go.kr (Playwright + HTTP hybrid → Excel 다운로드 → JSON 변환)
 # - 대상: src/data/real-estate/apartments.json 의 42개 단지 전체
 # - 저장: src/data/real-estate/area-cost/{kaptCode}/YYYYMM.json (giftbott/wooridanji)
-# - 모드: cron(월간 증분) + workflow_dispatch(백필/재수집) 동일 로직
+# - 모드: cron(KST 23~말일 08:00) + workflow_dispatch(백필/재수집) 동일 로직
 # - setup 잡이 각 단지의 기존 저장 파일을 확인하여 "누락 월만" 매트릭스에 emit
 #   → 이미 수집된 chunk는 아예 spin up 안 됨 (runner 시간 절약)
-# - 실패 1건이라도 발생 시: chunk exit 1 + 워크플로우 red + 텔레그램 요약 알림 1건
+# - K-apt 미공개(스크립트 stdout 패턴 매칭)는 EMPTY 카운트만 — chunk red 안 시킴
+# - 진짜 실패 1건이라도 발생 시: chunk exit 1 + 워크플로우 red + 텔레그램 요약 1건
+# - silent 윈도우: KST 23·24·25 (롤링 공개 진행 중) — 그 외 알림
 
 name: Fetch Management Fee by Area
 
 on:
   schedule:
-    # UTC 23:00 on days 23-27 → KST 08:00 on days 24-28 (KST = UTC+9, 하루 넘어감).
-    # k-apt 공개 관찰상 24일부터 전월 데이터 조회 가능.
-    - cron: '0 23 23-27 * *'
+    # UTC 23:00 on days 22-30 → KST 08:00 on days 23-31 (KST = UTC+9, 하루 넘어감).
+    # k-apt 공개 관찰상 24일부터 전월 데이터 조회 가능 — 23·24·25 시도는 거의 미공개라 silent.
+    - cron: '0 23 22-30 * *'
   workflow_dispatch:
     inputs:
       exclude:
@@ -27,11 +29,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  # 매년 12월 말 갱신 — k-apt 롤링 윈도우 silent 판정용 (KST 24·25 무조건, 26 주말·공휴일).
-  # fetch / commit 두 잡 모두 이 값을 그대로 사용 (단일 source of truth).
-  HOLIDAYS_KR: '2026-01-01 2026-02-16 2026-02-17 2026-02-18 2026-03-01 2026-03-02 2026-05-05 2026-05-24 2026-05-25 2026-06-06 2026-08-15 2026-09-24 2026-09-25 2026-09-26 2026-10-03 2026-10-09 2026-12-25'
 
 concurrency:
   group: area-cost
@@ -207,6 +204,7 @@ jobs:
           mkdir -p "$DIR" failures
 
           SUCCESS=0
+          EMPTY=0
           FAILED=0
           RATE_LIMITED=0
           CONSECUTIVE_RL=0
@@ -230,9 +228,10 @@ jobs:
             echo ""
             echo "[FETCH] $KAPT $M"
             set +e
-            npx tsx scripts/fetch-area-cost.ts --kapt "$KAPT" --name "$NAME" "$M"
+            LOG=$(npx tsx scripts/fetch-area-cost.ts --kapt "$KAPT" --name "$NAME" "$M" 2>&1)
             RC=$?
             set -e
+            echo "$LOG"
 
             if [ "$RC" -eq 0 ] && [ -f "$TARGET" ]; then
               SUCCESS=$((SUCCESS+1))
@@ -251,7 +250,13 @@ jobs:
                 echo "[WARN] 연속 rate-limit 3회 → chunk 조기 종료, 남은 월은 실패 처리"
                 BREAK_EARLY=true
               fi
+            elif [ "$RC" -eq 1 ] && echo "$LOG" | grep -qE "데이터가 아직 없습니다 \(미공개\)|데이터 없음 \(alert 응답\)"; then
+              # K-apt 미공개 — empty (스크립트 console.log 패턴 매칭). 실패 카운트 안 함.
+              EMPTY=$((EMPTY+1))
+              CONSECUTIVE_RL=0
+              sleep $((RANDOM % 11 + 5))
             else
+              # 진짜 실패 (exception, 다운로드 실패, 타임아웃 등).
               FAILED=$((FAILED+1))
               CONSECUTIVE_RL=0
               FAIL_LIST="$FAIL_LIST $M"
@@ -261,7 +266,7 @@ jobs:
 
           echo ""
           echo "=== $NAME ($KAPT) ${YEAR_LABEL}년 ==="
-          echo "성공: $SUCCESS / 실패: $FAILED (rate-limit: $RATE_LIMITED)"
+          echo "성공: $SUCCESS / 미공개: $EMPTY / 실패: $FAILED (rate-limit: $RATE_LIMITED)"
           [ -n "$FAIL_LIST" ] && echo "실패월:$FAIL_LIST"
 
           # 실패 기록: 같은 단지의 다른 연도 chunk와 충돌 안 나게 연도 포함.
@@ -270,27 +275,16 @@ jobs:
             echo "$FAIL_LIST" > "failures/${KAPT}-${YEAR_LABEL}.txt"
           fi
 
-          # 실패 1건이라도 있으면 chunk red. 단, k-apt 롤링 공개 윈도우는 silent:
-          # - KST 24·25일: 무조건 silent (롤링 공개 진행 중)
-          # - KST 26일: 주말 또는 공휴일이면 silent (평일은 정상 알림)
-          # - 27일 이후 또는 수동 dispatch: 알림
-          # 공휴일 리스트는 워크플로우 최상단 env.HOLIDAYS_KR — 매년 갱신 (한 곳만).
+          # 진짜 실패(FAILED) > 0 시 chunk red. 단, KST 23·24·25 silent (k-apt 롤링 공개 진행 중).
+          # K-apt 미공개(EMPTY)는 항상 silent — 카운트만 하고 chunk red 안 시킴.
           if [ "$FAILED" -gt 0 ]; then
-            KST_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')
             KST_DAY=$(TZ=Asia/Seoul date +'%d')
-            KST_DOW=$(TZ=Asia/Seoul date +'%u')  # 1=월 ... 7=일
             SILENT=false
-            if [ "${{ github.event_name }}" = "schedule" ]; then
-              if [ "$KST_DAY" = "24" ] || [ "$KST_DAY" = "25" ]; then
-                SILENT=true
-              elif [ "$KST_DAY" = "26" ]; then
-                if [ "$KST_DOW" -ge 6 ] || echo " $HOLIDAYS_KR " | grep -q " $KST_DATE "; then
-                  SILENT=true
-                fi
-              fi
+            if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" -ge 23 ] && [ "$KST_DAY" -le 25 ]; then
+              SILENT=true
             fi
             if [ "$SILENT" = "true" ]; then
-              echo "[INFO] $KST_DATE 실패 ${FAILED}건 → k-apt 롤링/주말·공휴일 윈도우, silent (chunk green)"
+              echo "[INFO] KST $KST_DAY일 — 23·24·25 silent 윈도우, chunk green ($FAILED건 보류)"
             else
               echo "[ERROR] 실패 ${FAILED}건 → chunk 실패로 종료"
               exit 1
@@ -357,29 +351,20 @@ jobs:
           commit_message: 'chore: update area-cost data'
           file_pattern: 'src/data/real-estate/area-cost/**/*.json'
 
-      # k-apt 롤링 공개 윈도우는 알림 skip (chunk silent 정책과 같은 조건):
-      # - KST 24·25일: 무조건 silent
-      # - KST 26일: 주말 또는 공휴일이면 silent (평일은 알림)
-      # - 27일+ 또는 수동 dispatch: 알림
+      # k-apt 롤링 공개 윈도우 알림 skip — chunk silent 정책과 같은 조건:
+      # - KST 23·24·25일: 무조건 silent (롤링 공개 진행 중, 데이터 미공개 일상)
+      # - KST 26일+ 또는 수동 dispatch: 알림
       - name: Decide notification policy
         id: policy
         if: steps.summary.outputs.total_fail != '0'
         run: |
-          KST_DATE=$(TZ=Asia/Seoul date +'%Y-%m-%d')
           KST_DAY=$(TZ=Asia/Seoul date +'%d')
-          KST_DOW=$(TZ=Asia/Seoul date +'%u')
           SILENT=false
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            if [ "$KST_DAY" = "24" ] || [ "$KST_DAY" = "25" ]; then
-              SILENT=true
-            elif [ "$KST_DAY" = "26" ]; then
-              if [ "$KST_DOW" -ge 6 ] || echo " $HOLIDAYS_KR " | grep -q " $KST_DATE "; then
-                SILENT=true
-              fi
-            fi
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$KST_DAY" -ge 23 ] && [ "$KST_DAY" -le 25 ]; then
+            SILENT=true
           fi
           if [ "$SILENT" = "true" ]; then
-            echo "[INFO] $KST_DATE 실패 ${{ steps.summary.outputs.total_fail }}건 → 롤링/주말·공휴일 윈도우, 알림 skip"
+            echo "[INFO] KST $KST_DAY일 — 23·24·25 silent 윈도우, 알림 skip"
             echo "alert=false" >> "$GITHUB_OUTPUT"
           else
             echo "alert=true" >> "$GITHUB_OUTPUT"
