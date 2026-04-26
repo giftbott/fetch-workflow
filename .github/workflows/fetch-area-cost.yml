@@ -309,7 +309,8 @@ jobs:
           if-no-files-found: ignore
 
   commit:
-    needs: fetch
+    # setup outputs (count, result) 직접 참조하므로 needs 에 명시 (fetch 만 적으면 actionlint 경고 + GHA 의미상으로도 미정의).
+    needs: [setup, fetch]
     # fetch 실패(chunk red) 시에도 실행 — 수집된 성공분은 커밋해야 함.
     # setup 이 실패하면 outputs 가 비어 download-artifact 에서 에러 나므로 result=='success' 가드 추가.
     # count=0 이면 fetch 잡이 skip 되고 aggregate 할 artifact 도 없으므로 commit 도 skip.
