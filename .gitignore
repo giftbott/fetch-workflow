@@ -2,3 +2,4 @@ CLAUDE.md
 *.swp
 *.swo
 .DS_Store
+docs/**
