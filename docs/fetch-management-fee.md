@@ -11,8 +11,8 @@ UI "단지 공통" 탭 전용 데이터 (장충금/에너지/개별/공용관리
 | 스크립트 | `scripts/fetch-management-fee.ts` |
 | 대상 월 | 1개월 전 (`date -d '1 month ago' +%Y%m`) |
 | 대상 단지 | `complexes.json` 메인 단지만 |
-| 출력 | `src/data/complexes/{slug}/management-fee/{YYYYMM}.json` |
-| commit pattern | `src/data/complexes/*/management-fee/*.json` |
+| 출력 | `src/data/real-estate/management-fee/{kaptCode}/{YYYYMM}.json` |
+| commit pattern | `src/data/real-estate/management-fee/**/*.json` |
 | concurrency | `data-commit` |
 
 ## 흐름
@@ -28,7 +28,7 @@ UI "단지 공통" 탭 전용 데이터 (장충금/에너지/개별/공용관리
 - **artifact path multi-line 필수** ([README → artifact path 규칙](./README.md#artifact-path-규칙-upload-artifactv4)):
   ```yaml
   path: |
-    src/data/complexes/${{ matrix.complex.slug }}/management-fee/
+    src/data/real-estate/management-fee/${{ matrix.complex.kaptCode }}/
     _artifact_root_anchor   # 실존 X, LCA 를 repo root 로 끌어올리기용 marker
   ```
 

@@ -1,7 +1,7 @@
 # 관리비 상세 스냅샷 수집
 # - 소스: 공공데이터포털 REST API (에너지, 장충금, 개별사용료, 공용관리비 등 26개 엔드포인트)
 # - 대상: 1개월 전 데이터
-# - 저장: src/data/complexes/{slug}/management-fee/YYYYMM.json (giftbott/wooridanji)
+# - 저장: src/data/real-estate/management-fee/{kaptCode}/YYYYMM.json (giftbott/wooridanji)
 # - 용도: 단지 공통 탭 (장충금, 에너지 비용, 공용관리비 상세)
 
 name: Fetch Management Fee Snapshot
@@ -52,7 +52,7 @@ jobs:
       - name: Fetch management fee
         run: |
           MONTH=$(date -d '1 month ago' +'%Y%m')
-          TARGET="src/data/complexes/${COMPLEX_SLUG}/management-fee/${MONTH}.json"
+          TARGET="src/data/real-estate/management-fee/${KAPT_CODE}/${MONTH}.json"
           if [ -f "$TARGET" ]; then
             echo "[INFO] 이미 스냅샷 존재: ${TARGET} (스킵)"
             exit 0
@@ -67,11 +67,11 @@ jobs:
           name: fee-${{ matrix.complex.slug }}
           # upload-artifact@v4 는 단일 path 지정 시 상위 디렉토리 prefix 를 trim 하므로
           # multi-line 으로 두 번째 더미 path 를 같이 지정해 공통 prefix 를 repo root 로
-          # 끌어올림 → artifact 안에 src/data/complexes/{slug}/management-fee/*.json 구조가
+          # 끌어올림 → artifact 안에 src/data/real-estate/management-fee/{kaptCode}/*.json 구조가
           # 보존되고 commit job 의 file_pattern 과 매칭된다.
           # _artifact_root_anchor 는 실존하지 않는 marker (if-no-files-found: ignore 로 무시).
           path: |
-            src/data/complexes/${{ matrix.complex.slug }}/management-fee/
+            src/data/real-estate/management-fee/${{ matrix.complex.kaptCode }}/
             _artifact_root_anchor
           retention-days: 1
           if-no-files-found: ignore
@@ -91,4 +91,4 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: 'chore: update management fee snapshot'
-          file_pattern: 'src/data/complexes/*/management-fee/*.json'
+          file_pattern: 'src/data/real-estate/management-fee/**/*.json'

@@ -8,7 +8,7 @@
 |---|---|---|---|
 | [Fetch News](./fetch-news.md) | 매일 07:50 | Google News RSS | `src/data/shared/news/` |
 | [Fetch Real Estate Data](./fetch-real-estate.md) | 매일 07:00 | 국토부 실거래가 OpenAPI | `public/data/real-estate/` |
-| [Fetch Management Fee Snapshot](./fetch-management-fee.md) | 매달 23~30일 09:00 | K-apt Open API | `src/data/complexes/{slug}/management-fee/` |
+| [Fetch Management Fee Snapshot](./fetch-management-fee.md) | 매달 23~30일 09:00 | K-apt Open API | `src/data/real-estate/management-fee/{kaptCode}/` |
 | [Fetch Management Fee by Area](./fetch-area-cost.md) | 매달 24~28일 08:00 | K-apt 웹 (Playwright) | `src/data/real-estate/area-cost/{kaptCode}/` |
 
 ## 시크릿
